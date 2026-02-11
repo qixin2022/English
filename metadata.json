@@ -1,0 +1,7 @@
+{
+  "name": "LinguistAI - Your Personal English Coach",
+  "description": "A high-performance English learning application using Gemini Live API for real-time voice conversation, error correction, and vocabulary enhancement.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
