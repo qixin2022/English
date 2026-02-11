@@ -8,9 +8,8 @@ import ChatInterface from './components/ChatInterface';
 import StatsSidebar from './components/StatsSidebar';
 import WelcomeOverlay from './components/WelcomeOverlay';
 
-// 使用最终版独立的存储键，确保数据纯净
-const STORAGE_KEY = 'linguist_ai_final_history';
-const STATS_KEY = 'linguist_ai_final_stats';
+const STORAGE_KEY = 'linguist_ai_final_history_v1';
+const STATS_KEY = 'linguist_ai_final_stats_v1';
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
@@ -30,7 +29,6 @@ const App: React.FC = () => {
       if (saved) {
         const stats = JSON.parse(saved);
         if (stats.date === today) return stats;
-        // 跨天逻辑：保留未完成的作业，清空时长
         return { 
           minutesSpoken: 0, 
           date: today, 
@@ -52,18 +50,6 @@ const App: React.FC = () => {
   const startTimeRef = useRef<number>(0);
   const lastHomeworkRef = useRef<string | undefined>(dailyStats.homeworkAssigned);
 
-  // 监听浏览器刷新，防止数据意外丢失
-  useEffect(() => {
-    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (status === AppStatus.ACTIVE) {
-        e.preventDefault();
-        e.returnValue = '';
-      }
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [status]);
-
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(transcript));
   }, [transcript]);
@@ -79,7 +65,6 @@ const App: React.FC = () => {
       return match ? match[1].trim() : '';
     };
 
-    // 默认回退逻辑：如果模型没按格式出，取第一个标签前的作为对话内容
     let natural = cleanSection('Spoken English Transcript', text);
     if (!natural) {
       natural = text.split('===')[0].trim();
@@ -90,7 +75,6 @@ const App: React.FC = () => {
     const homework = cleanSection("Today's Homework \\(今日作业\\)", text);
     const improved = cleanSection('Advanced Level Up', text);
 
-    // 解析内部知识点
     const vocabMatch = knowledgeText.match(/- 词汇 \(Vocab\):\s*([\s\S]*?)(?=- 地道表达|- 语法要点|$)/i);
     const phrasesMatch = knowledgeText.match(/- 地道表达 \(Phrases\):\s*([\s\S]*?)(?=- 语法要点|$)/i);
     const grammarMatch = knowledgeText.match(/- 语法要点 \(Grammar\):\s*([\s\S]*?)$/i);
@@ -122,7 +106,7 @@ const App: React.FC = () => {
 
           setTranscript(prev => [
             ...prev,
-            { id: `${turnId}-u`, sender: 'user', text: fullInput || "Voice interaction", audioBase64: userAudioBase64, timestamp: Date.now() },
+            { id: `${turnId}-u`, sender: 'user', text: fullInput || "Voice Check", audioBase64: userAudioBase64, timestamp: Date.now() },
             { 
               id: `${turnId}-t`, sender: 'tutor', text: parsed.natural, translation: parsed.translation,
               vocabulary: parsed.vocabulary, phrases: parsed.phrases, grammar: parsed.grammar,
@@ -131,13 +115,10 @@ const App: React.FC = () => {
             }
           ]);
 
-          if (parsed.homework) {
-            lastHomeworkRef.current = parsed.homework;
-          }
+          if (parsed.homework) lastHomeworkRef.current = parsed.homework;
 
-          // 智能检测作业提交
-          const inputLower = fullInput.toLowerCase();
-          const isCheckIn = inputLower.includes('homework') || inputLower.includes('作业') || inputLower.includes('批改') || inputLower.includes('submission');
+          const inputLower = (fullInput || "").toLowerCase();
+          const isCheckIn = inputLower.includes('homework') || inputLower.includes('作业') || inputLower.includes('批改');
           if (isCheckIn) {
             setDailyStats(prev => ({ ...prev, homeworkCompleted: true }));
           }
@@ -160,14 +141,19 @@ const App: React.FC = () => {
       const session = new GeminiLiveSession();
       sessionRef.current = session;
       
-      let context = `Mode: Practice. Current Date: ${dailyStats.date}. `;
+      let context = `Current Stats: ${dailyStats.minutesSpoken} mins today. `;
       if (dailyStats.homeworkAssigned && !dailyStats.homeworkCompleted) {
-        context = `Mode: Homework Grading. The user is submitting: "${dailyStats.homeworkAssigned}". Provide specific feedback, corrections, and a score out of 10. `;
+        context += `IMPORTANT: The user is submitting their homework: "${dailyStats.homeworkAssigned}". Review it now. `;
       }
 
       await session.start({
         onMessage: handleMessage,
-        onError: (e) => { setErrorMessage(e?.message); setStatus(AppStatus.ERROR); stopSession(); },
+        onError: (e) => { 
+          console.error(e);
+          setErrorMessage("Connection lost. Please try again."); 
+          setStatus(AppStatus.ERROR); 
+          stopSession(); 
+        },
         onClose: () => { finalizeStop(); if (status !== AppStatus.ERROR) setStatus(AppStatus.IDLE); }
       }, context);
       
@@ -183,15 +169,11 @@ const App: React.FC = () => {
       const durationMs = Date.now() - startTimeRef.current;
       const minutes = Math.ceil(durationMs / 60000);
       
-      setDailyStats(prev => {
-        // 如果没有明确作业，且通话时长超过一定时间，自动生成一个基于词汇的作业
-        const autoHomework = lastHomeworkRef.current || (minutes >= 1 ? "Review the vocabulary and phrases from today's conversation." : undefined);
-        return { 
-          ...prev, 
-          minutesSpoken: prev.minutesSpoken + minutes,
-          homeworkAssigned: prev.homeworkAssigned || autoHomework
-        };
-      });
+      setDailyStats(prev => ({ 
+        ...prev, 
+        minutesSpoken: prev.minutesSpoken + minutes,
+        homeworkAssigned: prev.homeworkAssigned || lastHomeworkRef.current || (minutes >= 1 ? "Review today's session notes." : undefined)
+      }));
       startTimeRef.current = 0;
     }
   };
@@ -203,23 +185,27 @@ const App: React.FC = () => {
   };
 
   const clearHistory = () => {
-    if (window.confirm('警告：这将永久删除所有练习历史、单词本和当前的作业进度。确定吗？')) {
+    if (window.confirm('Delete all data? This cannot be undone.')) {
       setTranscript([]);
       setDailyStats({ minutesSpoken: 0, date: new Date().toISOString().split('T')[0] });
-      localStorage.removeItem(STORAGE_KEY);
-      localStorage.removeItem(STATS_KEY);
-      window.location.reload(); // 重置所有内存状态
+      localStorage.clear();
+      window.location.reload();
     }
   };
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-[#020617] text-slate-100">
       <Header onClearHistory={clearHistory} />
-      <main className="flex-1 flex overflow-hidden p-6 gap-6">
+      {errorMessage && (
+        <div className="bg-red-500/20 text-red-400 p-2 text-center text-xs font-bold border-b border-red-500/30">
+          {errorMessage}
+        </div>
+      )}
+      <main className="flex-1 flex overflow-hidden p-4 md:p-6 gap-6">
         <div className="hidden lg:flex w-[24rem] flex-col">
           <StatsSidebar stats={dailyStats} />
         </div>
-        <div className="flex-1 flex flex-col glass-morphism rounded-[3rem] overflow-hidden relative border border-white/5 shadow-inner">
+        <div className="flex-1 flex flex-col glass-morphism rounded-[2.5rem] md:rounded-[3rem] overflow-hidden relative border border-white/5 shadow-inner">
           <ChatInterface 
             status={status} transcript={transcript} currentInput={currentInput}
             currentOutput={currentOutput} onStart={startSession}
